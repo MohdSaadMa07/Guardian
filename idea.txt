@@ -1,0 +1,93 @@
+Project Title: Guardian – AI-Powered Windows System Monitor and Anomaly Detector
+
+Abstract
+Guardian is a systems-level monitoring application built for Windows that continuously observes system behavior, logs telemetry data, and detects abnormal resource usage using machine learning. The project combines operating system interaction, real-time data pipelines, and anomaly detection to create an intelligent watchdog tool. Guardian operates as a terminal-based dashboard that provides live system insights, automated alerts, and predictive analysis of system stress.
+
+Objective
+The objective of this project is to design and implement a real-time monitoring system that demonstrates advanced Python systems programming, machine learning integration, and architectural design. The project aims to simulate professional monitoring software used in enterprise environments while remaining feasible as a solo engineering effort.
+
+Problem Statement
+Modern users lack visibility into system behavior beyond basic task managers. Sudden performance degradation, runaway processes, or abnormal activity often go unnoticed until system failure occurs. Guardian addresses this gap by learning normal system behavior and automatically detecting anomalies, providing proactive alerts and insights.
+
+Key Features
+• Real-time CPU, RAM, disk, and process monitoring
+• Continuous telemetry logging pipeline
+• Machine learning anomaly detection engine
+• Windows desktop notification alerts
+• Terminal dashboard with live system visualization
+• Historical data storage and session recording
+• Intelligent system stress predictions
+• Automated alert and event management
+
+System Architecture
+Guardian is divided into modular components:
+
+1. Telemetry Engine
+   Collects system metrics using OS-level APIs and maintains a continuous monitoring loop.
+
+2. Storage Pipeline
+   Stores time-series telemetry data in a structured database for historical analysis.
+
+3. ML Anomaly Engine
+   Learns normal system behavior using unsupervised machine learning and flags abnormal activity.
+
+4. Alert System
+   Triggers Windows notifications and logs events when anomalies are detected.
+
+5. Terminal Dashboard
+   Displays live system data and alerts through a real-time terminal interface.
+
+Technology Stack
+• Python
+• psutil (OS telemetry)
+• SQLite/PostgreSQL (data storage)
+• scikit-learn (machine learning)
+• Textual/Rich (terminal UI)
+• win10toast (Windows notifications)
+
+Implementation Plan
+Week 1: Build telemetry engine and monitoring loop
+Week 2: Develop terminal dashboard interface
+Week 3: Implement database logging pipeline
+Week 4: Train and integrate anomaly detection model
+Week 5: Build alert and notification system
+Week 6: Packaging, testing, and documentation
+
+
+Expected Outcomes
+• A functional AI-driven monitoring tool
+• Demonstration of systems programming skills
+• Integration of ML into a production-style pipeline
+• Real-time event-driven architecture
+• Resume-ready engineering project
+
+Applications
+Guardian can be extended for cybersecurity monitoring, performance optimization, enterprise telemetry analysis, or predictive maintenance systems.
+
+Conclusion
+This project demonstrates advanced capabilities in operating system interaction, real-time data processing, and machine learning deployment. Guardian represents a professional-grade engineering effort suitable for showcasing technical depth in college placements and software engineering portfolios.
+
+
+1. The Detection Hierarchy (The "Motion Sensor")
+Tier 1: Rule-Based (Hard Thresholds): Immediate alerts for physical safety (e.g., CPU > 95% or Temp > 90°C).
+
+Tier 2: Local ML (Isolation Forest): Unsupervised learning that flags "Statistical Anomalies"—combinations of CPU/RAM/Disk that don't fit the user's historical "Normal" pattern.
+
+2. The Reasoning Layer (The "Detective")
+Problem: Avoiding "Edge Case Hell" (trying to manually code every reason why a system might spike).
+
+Solution: LLM-Powered Analysis: When a Tier 2 anomaly is detected, the system captures a System Snapshot (Top 5 processes, I/O activity, and User Idle time).
+
+Action: This snapshot is sent to an external AI (e.g., Gemini API) to provide a natural language "Justification."
+
+3. Contextual Justification Logic
+The AI distinguishes between:
+
+Expected High Load: (e.g., Windows Update, Virus Scans, Video Rendering).
+
+User-Driven Load: (e.g., Gaming, Compiling code).
+
+Suspicious Activity: (e.g., Background miners, memory leaks, or "Zombie" processes with high CPU but 0% User Input).
+
+4. Human-in-the-Loop Refinement
+Feedback Loop: User can "Dismiss" an AI alert. This feedback is saved back to the local SQLite database, telling the Local ML model to incorporate that specific data "shape" into the "Normal" cluster for future training.
