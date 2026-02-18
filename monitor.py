@@ -1,4 +1,5 @@
 import psutil
+import time
 from typing import Tuple
 
 
@@ -19,33 +20,24 @@ class SystemStats:
         return self.ram_total_mb - self.ram_mb
 
 
-def get_system_snapshot(limit=5):
-    """
-    Returns a list of the top N resource-intensive processes.
-    """
+def get_process_snapshot(limit=10):
     processes = []
 
-    # We use process_iter to efficiently grab info for all running apps
-    for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent']):
+    for proc in psutil.process_iter(['pid','name','cpu_percent','memory_percent','create_time']):
         try:
-            # We fetch the info once to avoid multiple OS calls
-            pinfo = proc.info
-            # Ignore the "Idle" process which always shows high CPU
-            if pinfo['name'].lower() != "idle":
-                processes.append(pinfo)
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            p = proc.info
+            processes.append({
+                "pid": p['pid'],
+                "name": p['name'],
+                "cpu": p['cpu_percent'],
+                "memory": p['memory_percent'],
+                "uptime": time.time() - p['create_time']
+            })
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
 
-    # Sort by CPU usage and take the top N
-    top_procs = sorted(processes, key=lambda p: p['cpu_percent'], reverse=True)[:limit]
-
-    # Format for the AI
-    snapshot_str = "\n".join([
-        f"- {p['name']} (PID: {p['pid']}): CPU {p['cpu_percent']}% | RAM {p['memory_percent']:.1f}%"
-        for p in top_procs
-    ])
-
-    return snapshot_str
+    processes.sort(key=lambda x: x['cpu'], reverse=True)
+    return processes[:limit]
 
 def get_stats() -> SystemStats:
     try:
