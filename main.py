@@ -2,6 +2,7 @@ import time
 from collections import deque
 from datetime import datetime
 
+import numpy as np
 from rich import box
 from rich.align import Align
 from rich.console import Group
@@ -11,7 +12,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from db import get_stats_summary, init_db, save
+from db import init_db, save
 from monitor import get_process_snapshot, get_stats
 
 init_db()
@@ -29,16 +30,96 @@ SPARKLINE_BARS = " ▁▂▃▄▅▆▇█"
 REFRESH_RATE   = 1
 START_TIME     = datetime.now()
 
-cpu_history  = deque([0.0] * SPARKLINE_LEN, maxlen=SPARKLINE_LEN)
-ram_history  = deque([0.0] * SPARKLINE_LEN, maxlen=SPARKLINE_LEN)
-disk_history = deque([0.0] * SPARKLINE_LEN, maxlen=SPARKLINE_LEN)
+# ── History buffers ───────────────────────────────────────────────────────────
+
+cpu_history      = deque([0.0] * SPARKLINE_LEN, maxlen=SPARKLINE_LEN)
+ram_history      = deque([0.0] * SPARKLINE_LEN, maxlen=SPARKLINE_LEN)
+disk_history     = deque([0.0] * SPARKLINE_LEN, maxlen=SPARKLINE_LEN)
 net_up_history   = deque([0.0] * SPARKLINE_LEN, maxlen=SPARKLINE_LEN)
 net_down_history = deque([0.0] * SPARKLINE_LEN, maxlen=SPARKLINE_LEN)
-alert_log    = deque(maxlen=5)
+alert_log        = deque(maxlen=5)
 
-# Track last alert time per metric to avoid spam
 _last_alert_time = {}
-ALERT_COOLDOWN = 60  # seconds
+ALERT_COOLDOWN   = 60
+
+# ── Z-Score config ────────────────────────────────────────────────────────────
+
+Z_WINDOW      = 60    # look at last 60 readings
+Z_THRESHOLD   = 3.0   # flag if |z| > 3
+Z_MIN_SAMPLES = 30    # don't fire until we have enough history
+
+# Dedicated buffers for z-score (longer than sparkline)
+z_cpu_buf  = deque(maxlen=Z_WINDOW)
+z_ram_buf  = deque(maxlen=Z_WINDOW)
+z_up_buf   = deque(maxlen=Z_WINDOW)
+z_down_buf = deque(maxlen=Z_WINDOW)
+
+# Last z-score results (displayed in panel)
+z_results: dict = {}   # metric -> {"z": float, "mean": float, "val": float}
+z_anomalies: list = [] # list of flagged metric names this tick
+
+
+# ── Z-Score detection ─────────────────────────────────────────────────────────
+
+def run_zscore(cpu: float, ram: float,
+               net_up: float, net_down: float) -> list:
+    """
+    Feed new values, compute z-scores against recent history.
+    Returns list of anomaly descriptions.
+    """
+    global z_results, z_anomalies
+
+    z_cpu_buf.append(cpu)
+    z_ram_buf.append(ram)
+    z_up_buf.append(net_up)
+    z_down_buf.append(net_down)
+
+    anomalies = []
+    results   = {}
+
+    # Need minimum samples before we start scoring
+    if len(z_cpu_buf) < Z_MIN_SAMPLES:
+        z_results   = {}
+        z_anomalies = []
+        return []
+
+    checks = [
+        ("CPU",          cpu,      z_cpu_buf),
+        ("RAM",          ram,      z_ram_buf),
+        ("Net Upload",   net_up,   z_up_buf),
+        ("Net Download", net_down, z_down_buf),
+    ]
+
+    for label, val, buf in checks:
+        arr  = np.array(buf)
+        mean = arr.mean()
+        std  = arr.std()
+
+        if std < 0.01:          # flat signal — skip to avoid divide-by-zero
+            results[label] = {"z": 0.0, "mean": mean, "val": val, "flagged": False}
+            continue
+
+        z = (val - mean) / std  # signed z-score
+        flagged = abs(z) > Z_THRESHOLD
+
+        results[label] = {
+            "z":       round(z, 2),
+            "mean":    round(mean, 1),
+            "std":     round(std, 2),
+            "val":     round(val, 1),
+            "flagged": flagged,
+        }
+
+        if flagged:
+            direction = "▲ spike" if z > 0 else "▼ drop"
+            anomalies.append(
+                f"{label} {direction}: {val:.1f} "
+                f"(mean={mean:.1f}, σ={std:.2f}, z={z:.1f})"
+            )
+
+    z_results   = results
+    z_anomalies = [k for k, v in results.items() if v.get("flagged")]
+    return anomalies
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -89,15 +170,11 @@ def _mini_bar(value: float, color: str, width: int = 16) -> Text:
 
 
 def _fmt_speed(kb: float) -> str:
-    if kb >= 1024:
-        return f"{kb/1024:.1f} MB/s"
-    return f"{kb:.0f} KB/s"
+    return f"{kb/1024:.1f} MB/s" if kb >= 1024 else f"{kb:.0f} KB/s"
 
 
 def _fmt_total(mb: float) -> str:
-    if mb >= 1024:
-        return f"{mb/1024:.2f} GB"
-    return f"{mb:.0f} MB"
+    return f"{mb/1024:.2f} GB" if mb >= 1024 else f"{mb:.0f} MB"
 
 
 def _uptime() -> str:
@@ -143,11 +220,19 @@ def build_metrics(stats) -> Panel:
 
     def metric_row(label, value, metric, history):
         color, status, badge_style = _threshold(value, metric)
+
+        # Override badge if z-score flagged this metric
+        metric_key = label.split()[0]  # "CPU", "RAM", "Disk"
+        if metric_key in z_anomalies:
+            badge = Text(" ⚠ Z-SPIKE ", style="bold yellow on grey7")
+        else:
+            badge = Text(f" {status} ", style=f"{badge_style} on grey7")
+
         grid.add_row(
             Text(label, style="dim"),
             Text(f"{value:.1f}%", style=f"bold {color}"),
             _bar(value, metric, 24),
-            Text(f" {status} ", style=f"{badge_style} on grey7"),
+            badge,
         )
         grid.add_row("", "", _sparkline(history, color), "")
 
@@ -191,7 +276,6 @@ def build_processes(procs) -> Panel:
     for p in procs:
         cpu_v = float(p["cpu"])
         ram_v = float(p["memory"])
-
         cpu_color = "red" if cpu_v > 70 else "yellow" if cpu_v > 40 else "green"
         ram_color = "red" if ram_v > 20 else "yellow" if ram_v > 10 else "cyan"
 
@@ -237,11 +321,10 @@ def build_status(stats) -> Panel:
 
 
 def build_network(stats) -> Panel:
-    up_kb   = stats.net_sent_speed
-    down_kb = stats.net_recv_speed
+    up_kb     = stats.net_sent_speed
+    down_kb   = stats.net_recv_speed
     peak_up   = max(net_up_history)   or 1
     peak_down = max(net_down_history) or 1
-
     up_color   = "yellow" if up_kb   > 1024 else "green"
     down_color = "yellow" if down_kb > 1024 else "cyan"
 
@@ -253,28 +336,91 @@ def build_network(stats) -> Panel:
     grid.add_row(
         Text("▲ UP",   style=f"bold {up_color}"),
         Text(_fmt_speed(up_kb),   style=f"bold {up_color}"),
-        _net_sparkline(net_up_history,   up_color,   peak_up),
+        _net_sparkline(net_up_history, up_color, peak_up),
     )
     grid.add_row(
         Text("▼ DOWN", style=f"bold {down_color}"),
         Text(_fmt_speed(down_kb), style=f"bold {down_color}"),
         _net_sparkline(net_down_history, down_color, peak_down),
     )
-
-    grid.add_row("", "", "")   # spacer
-
+    grid.add_row("", "", "")
     grid.add_row(
-        Text("Sent",  style="dim"),
+        Text("Sent", style="dim"),
         Text(_fmt_total(stats.net_sent_mb), style="green"),
         Text("since boot", style="dim"),
     )
     grid.add_row(
-        Text("Recv",  style="dim"),
+        Text("Recv", style="dim"),
         Text(_fmt_total(stats.net_recv_mb), style="cyan"),
         Text("since boot", style="dim"),
     )
 
-    return Panel(grid, title="[bold green]  Network I/O[/]", border_style="green", box=box.ROUNDED)
+    return Panel(grid, title="[bold green]  Network I/O[/]",
+                 border_style="green", box=box.ROUNDED)
+
+
+def build_zscore() -> Panel:
+    """Z-Score anomaly panel — shows live z-scores for each metric."""
+
+    samples = len(z_cpu_buf)
+
+    # Still warming up
+    if samples < Z_MIN_SAMPLES:
+        body = Text(
+            f"⏳  Collecting baseline — {samples}/{Z_MIN_SAMPLES} samples\n"
+            f"    Z-Score detection starts automatically.",
+            style="dim",
+        )
+        return Panel(body, title="[bold yellow]  Z-Score Detection[/]",
+                     border_style="yellow", box=box.ROUNDED)
+
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(width=13, style="dim")   # metric name
+    grid.add_column(width=7,  justify="right")  # current val
+    grid.add_column(width=7,  justify="right")  # mean
+    grid.add_column(width=7,  justify="right")  # z-score
+    grid.add_column(width=8,  justify="center") # flag
+
+    grid.add_row(
+        Text("Metric",  style="bold dim"),
+        Text("Value",   style="bold dim"),
+        Text("Mean",    style="bold dim"),
+        Text("z",       style="bold dim"),
+        Text("",        style="bold dim"),
+    )
+
+    has_anomaly = False
+
+    for label, key in [("CPU", "CPU"), ("RAM", "RAM"),
+                        ("Net ▲", "Net Upload"), ("Net ▼", "Net Download")]:
+        r = z_results.get(key)
+        if not r:
+            continue
+
+        z       = r["z"]
+        flagged = r["flagged"]
+
+        if flagged:
+            has_anomaly = True
+            z_color  = "red" if abs(z) > 4 else "yellow"
+            flag_txt = Text(" ⚠ SPIKE ", style=f"bold {z_color} on grey7")
+        else:
+            z_color  = "green"
+            flag_txt = Text("  OK  ",    style="dim on grey7")
+
+        grid.add_row(
+            Text(label),
+            Text(f"{r['val']:.1f}",  style="bold white"),
+            Text(f"{r['mean']:.1f}", style="dim"),
+            Text(f"{z:+.2f}",        style=f"bold {z_color}"),
+            flag_txt,
+        )
+
+    border = "red" if has_anomaly else "green"
+    title  = "[bold red]  ⚠ Z-Score Detection[/]" if has_anomaly \
+             else "[bold green]  Z-Score Detection[/]"
+
+    return Panel(grid, title=title, border_style=border, box=box.ROUNDED)
 
 
 def build_alert_log() -> Panel:
@@ -301,6 +447,12 @@ def make_layout(stats, procs) -> Layout:
         Layout(name="right", ratio=3),
     )
 
+    # Left: metrics on top, z-score panel on bottom
+    root["left"].split_column(
+        Layout(name="metrics",  ratio=3),
+        Layout(name="zscore",   ratio=2),
+    )
+
     root["right"].split_column(
         Layout(name="processes",  ratio=3),
         Layout(name="bottom_row", ratio=2),
@@ -312,7 +464,8 @@ def make_layout(stats, procs) -> Layout:
     )
 
     root["header"].update(build_header())
-    root["left"].update(build_metrics(stats))
+    root["metrics"].update(build_metrics(stats))
+    root["zscore"].update(build_zscore())
     root["processes"].update(build_processes(procs))
     root["status"].update(build_status(stats))
     root["network"].update(build_network(stats))
@@ -336,6 +489,19 @@ def main():
                 disk_history.append(stats.disk)
                 net_up_history.append(stats.net_sent_speed)
                 net_down_history.append(stats.net_recv_speed)
+
+                # Run Z-Score detection
+                anomalies = run_zscore(
+                    cpu=stats.cpu,
+                    ram=stats.ram,
+                    net_up=stats.net_sent_speed,
+                    net_down=stats.net_recv_speed,
+                )
+
+                # Log any anomalies to alert panel
+                for a in anomalies:
+                    metric_key = a.split()[0]
+                    _log_alert(f"z_{metric_key}", f"[bold yellow]⚠ Z-Score[/] {a}")
 
                 live.update(make_layout(stats, procs), refresh=True)
                 time.sleep(REFRESH_RATE)
